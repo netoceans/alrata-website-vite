@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useReducer, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowRight,
@@ -260,103 +260,152 @@ function Hero() {
   )
 }
 
+type StoryNavigation = { step: -1 | 1 } | { index: number }
+type StoryCarouselState = {
+  index: number
+  fromIndex: number | null
+  pending: StoryNavigation | null
+  transitionId: number
+}
+type StoryCarouselAction =
+  | { type: 'navigate'; request: StoryNavigation; animate: boolean }
+  | { type: 'finish'; transitionId: number; animate: boolean }
+
+function moveStory(state: StoryCarouselState, request: StoryNavigation, animate: boolean): StoryCarouselState {
+  const count = patientStories.length
+  const target = 'index' in request ? request.index : state.index + request.step
+  const index = (target + count) % count
+  if (index === state.index) return { ...state, fromIndex: null, pending: null }
+  return { index, fromIndex: animate ? state.index : null, pending: null, transitionId: state.transitionId + 1 }
+}
+
+function storyCarouselReducer(state: StoryCarouselState, action: StoryCarouselAction): StoryCarouselState {
+  if (action.type === 'navigate') {
+    // Only the latest request waits behind the current animation.
+    if (state.fromIndex !== null) return { ...state, pending: action.request }
+    return moveStory(state, action.request, action.animate)
+  }
+  if (action.transitionId !== state.transitionId || state.fromIndex === null) return state
+  return state.pending
+    ? moveStory(state, state.pending, action.animate)
+    : { ...state, fromIndex: null }
+}
+
+function storyPosition(index: number, activeIndex: number) {
+  if (index === activeIndex) return 'center'
+  return index === (activeIndex + 1) % patientStories.length ? 'right' : 'left'
+}
+
 function PatientStories() {
-  const carouselSlides = [
-    { video: patientStories[patientStories.length - 1], logicalIndex: patientStories.length - 1, key: 'clone-last' },
-    ...patientStories.map((video, logicalIndex) => ({ video, logicalIndex, key: `story-${logicalIndex}` })),
-    { video: patientStories[0], logicalIndex: 0, key: 'clone-first' },
-  ]
-  const [activeIndex, setActiveIndex] = useState(2)
-  const trackRef = useRef<HTMLDivElement>(null)
-  const slideRefs = useRef<Array<HTMLElement | null>>([])
-  const scrollFrame = useRef(0)
-  const animationFrame = useRef(0)
-  const settleTimer = useRef(0)
-
-  const slideTarget = (index: number) => {
-    const slide = slideRefs.current[index]
-    const track = trackRef.current
-    if (!slide || !track) return null
-    return slide.offsetLeft - (track.clientWidth - slide.clientWidth) / 2
-  }
-
-  const centerSlide = (index: number, animate = true) => {
-    const boundedIndex = Math.max(0, Math.min(carouselSlides.length - 1, index))
-    const track = trackRef.current
-    const target = slideTarget(boundedIndex)
-    if (!track || target === null) return
-    cancelAnimationFrame(animationFrame.current)
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    setActiveIndex(boundedIndex)
-    if (!animate || reduceMotion) {
-      track.scrollLeft = target
-      return
-    }
-
-    const start = track.scrollLeft
-    const distance = target - start
-    const duration = 720
-    const startedAt = performance.now()
-    const move = (now: number) => {
-      const progress = Math.min((now - startedAt) / duration, 1)
-      const eased = progress < .5 ? 4 * progress ** 3 : 1 - ((-2 * progress + 2) ** 3) / 2
-      track.scrollLeft = start + distance * eased
-      if (progress < 1) animationFrame.current = requestAnimationFrame(move)
-    }
-    animationFrame.current = requestAnimationFrame(move)
-  }
+  const [carousel, dispatch] = useReducer(storyCarouselReducer, {
+    index: 1, fromIndex: null, pending: null, transitionId: 0,
+  })
+  const [playerIndex, setPlayerIndex] = useState<number | null>(null)
+  const [playbackError, setPlaybackError] = useState('')
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  const carouselRef = useRef<HTMLDivElement>(null)
+  const videoRefs = useRef<Array<HTMLVideoElement | null>>([])
+  const pointerStart = useRef<{ id: number; x: number; y: number; dragging: boolean } | null>(null)
+  const suppressClickUntil = useRef(0)
+  const playRequest = useRef(0)
+  const moving = carousel.fromIndex !== null
 
   useEffect(() => {
-    const frame = requestAnimationFrame(() => centerSlide(2, false))
+    const query = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setReducedMotion(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+
+  useEffect(() => {
+    if (!moving) return
+    const finish = () => dispatch({ type: 'finish', transitionId: carousel.transitionId, animate: !reducedMotion })
+    if (reducedMotion) {
+      finish()
+      return
+    }
+    // Fallback for interrupted animations, including background-tab throttling.
+    const timer = window.setTimeout(finish, 620)
+    return () => window.clearTimeout(timer)
+  }, [moving, carousel.transitionId, reducedMotion])
+
+  useEffect(() => {
+    const videos = videoRefs.current
     return () => {
-      cancelAnimationFrame(frame)
-      cancelAnimationFrame(animationFrame.current)
-      window.clearTimeout(settleTimer.current)
+      playRequest.current += 1
+      videos.forEach((video) => video?.pause())
     }
   }, [])
 
-  const updateActiveSlide = () => {
-    cancelAnimationFrame(scrollFrame.current)
-    scrollFrame.current = requestAnimationFrame(() => {
-      const track = trackRef.current
-      if (!track) return
-      const trackCenter = track.scrollLeft + track.clientWidth / 2
-      let nearestIndex = 0
-      let nearestDistance = Number.POSITIVE_INFINITY
-      slideRefs.current.forEach((slide, index) => {
-        if (!slide) return
-        const slideCenter = slide.offsetLeft + slide.clientWidth / 2
-        const distance = Math.abs(trackCenter - slideCenter)
-        if (distance < nearestDistance) {
-          nearestDistance = distance
-          nearestIndex = index
-        }
-      })
-      setActiveIndex(nearestIndex)
-      window.clearTimeout(settleTimer.current)
-      settleTimer.current = window.setTimeout(() => {
-        if (nearestIndex === 0) centerSlide(carouselSlides.length - 2, false)
-        if (nearestIndex === carouselSlides.length - 1) centerSlide(1, false)
-      }, 180)
+  const navigate = (request: StoryNavigation) => {
+    if (!moving && 'index' in request && request.index === carousel.index) return
+    playRequest.current += 1
+    videoRefs.current.forEach((video) => {
+      if (video === document.activeElement) carouselRef.current?.focus({ preventScroll: true })
+      video?.pause()
     })
+    setPlayerIndex(null)
+    setPlaybackError('')
+    dispatch({ type: 'navigate', request, animate: !reducedMotion })
+  }
+
+  const playStory = (index: number) => {
+    const video = videoRefs.current[index]
+    if (!video || moving) return
+    const request = ++playRequest.current
+    setPlayerIndex(index)
+    setPlaybackError('')
+    void video.play().catch(() => {
+      if (request !== playRequest.current) return
+      setPlayerIndex(null)
+      setPlaybackError('This preview could not play. Please try again.')
+    })
+    // The play button becomes hidden; move its keyboard focus into the player.
+    video.tabIndex = 0
+    video.focus({ preventScroll: true })
   }
 
   const handleCarouselKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault()
-      centerSlide(activeIndex - 1)
+    if ((event.target as HTMLElement).closest('video, input, select, textarea, [contenteditable="true"]')) return
+    if (event.altKey || event.ctrlKey || event.metaKey) return
+    const requests: Record<string, StoryNavigation> = {
+      ArrowLeft: { step: -1 }, ArrowRight: { step: 1 }, Home: { index: 0 }, End: { index: patientStories.length - 1 },
     }
-    if (event.key === 'ArrowRight') {
-      event.preventDefault()
-      centerSlide(activeIndex + 1)
+    const request = requests[event.key]
+    if (!request) return
+    event.preventDefault()
+    navigate(request)
+  }
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!event.isPrimary || event.button !== 0 || (event.target as HTMLElement).closest('video')) return
+    pointerStart.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragging: false }
+  }
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = pointerStart.current
+    if (!start || start.id !== event.pointerId) return
+    const dx = Math.abs(event.clientX - start.x)
+    const dy = Math.abs(event.clientY - start.y)
+    if (!start.dragging && dy > 10 && dy >= dx) {
+      pointerStart.current = null
+      return
     }
-    if (event.key === 'Home') {
-      event.preventDefault()
-      centerSlide(1)
+    if (dx > 10 && dx > dy * 1.25) {
+      start.dragging = true
+      event.currentTarget.setPointerCapture(event.pointerId)
     }
-    if (event.key === 'End') {
-      event.preventDefault()
-      centerSlide(carouselSlides.length - 2)
+  }
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = pointerStart.current
+    pointerStart.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    if (!start || start.id !== event.pointerId || !start.dragging) return
+    suppressClickUntil.current = performance.now() + 350
+    const dx = event.clientX - start.x
+    if (Math.abs(dx) >= 48 && Math.abs(dx) > Math.abs(event.clientY - start.y) * 1.25) {
+      navigate({ step: dx < 0 ? 1 : -1 })
     }
   }
 
@@ -367,62 +416,128 @@ function PatientStories() {
           <h2 id="stories-title">Patient stories, brought to life.</h2>
           <p>These working dental video previews show the intended experience. They are stock demonstrations, not Alrata patient testimonials.</p>
         </Reveal>
-        <div className="story-carousel-wrap">
+        <div
+          ref={carouselRef}
+          className="story-carousel-wrap"
+          role="region"
+          aria-roledescription="carousel"
+          aria-label="Patient story previews"
+          tabIndex={0}
+          onKeyDown={handleCarouselKeyDown}
+        >
           <div
-            ref={trackRef}
+            id="story-carousel-stage"
             className="story-carousel"
-            role="region"
-            aria-roledescription="carousel"
-            aria-label="Patient story previews"
-            tabIndex={0}
-            onScroll={updateActiveSlide}
-            onKeyDown={handleCarouselKeyDown}
+            data-moving={moving || undefined}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={() => { pointerStart.current = null }}
+            onLostPointerCapture={() => { pointerStart.current = null }}
+            onClickCapture={(event) => {
+              if (event.detail !== 0 && performance.now() < suppressClickUntil.current) {
+                event.preventDefault()
+                event.stopPropagation()
+              }
+            }}
           >
-            {carouselSlides.map(({ video, logicalIndex, key }, index) => {
-              const isActive = index === activeIndex
-              const isClone = key.startsWith('clone-')
+            {patientStories.map((video, index) => {
+              const isActive = index === carousel.index
+              const showPlayer = isActive && playerIndex === index && !moving
+              const position = storyPosition(index, carousel.index)
+              const from = carousel.fromIndex === null ? undefined : storyPosition(index, carousel.fromIndex)
               return (
                 <article
-                  key={key}
-                  ref={(node) => { slideRefs.current[index] = node }}
-                  className={`story-slide ${isActive ? 'story-slide--active' : ''}`}
-                  data-position={isActive ? 'center' : index < activeIndex ? 'left' : 'right'}
-                  aria-label={isClone ? undefined : `${logicalIndex + 1} of ${patientStories.length}: ${video.title}`}
-                  aria-current={isActive && !isClone ? 'true' : undefined}
-                  aria-hidden={isClone || undefined}
+                  key={video.title}
+                  className="story-slide"
+                  data-position={position}
+                  data-from={from}
+                  data-animation={moving ? carousel.transitionId % 2 : undefined}
+                  role="group"
+                  aria-roledescription="slide"
+                  aria-label={`${index + 1} of ${patientStories.length}: ${video.title}`}
+                  aria-current={isActive ? 'true' : undefined}
+                  onAnimationEnd={(event) => {
+                    if (event.target === event.currentTarget && isActive) {
+                      dispatch({ type: 'finish', transitionId: carousel.transitionId, animate: !reducedMotion })
+                    }
+                  }}
                 >
                   <div className="story-slide-media">
-                    {isActive && !isClone && video.media.src ? (
-                      <video controls playsInline preload="metadata" poster={video.media.poster} aria-label={video.media.alt}>
+                    {video.media.src ? (
+                      <video
+                        ref={(node) => { videoRefs.current[index] = node }}
+                        controls={showPlayer}
+                        playsInline
+                        preload={isActive ? 'metadata' : 'none'}
+                        poster={video.media.poster}
+                        aria-label={video.media.alt}
+                        aria-hidden={!showPlayer}
+                        tabIndex={showPlayer ? 0 : -1}
+                        onPlay={(event) => {
+                          if (!isActive || moving) event.currentTarget.pause()
+                        }}
+                      >
                         <source src={video.media.src} type="video/mp4" />
                       </video>
                     ) : (
-                      <button type="button" tabIndex={isClone ? -1 : 0} onClick={() => centerSlide(index)} aria-label={`Center ${video.title}`}>
-                        <img src={video.media.poster} alt={video.media.alt} loading="lazy" decoding="async" />
-                        <span className="story-play" aria-hidden="true"><Play fill="currentColor" size={19} /></span>
-                      </button>
+                      <img src={video.media.poster} alt={video.media.alt} loading="lazy" decoding="async" />
                     )}
-                    <span className="media-credit">{video.media.credit}</span>
-                  </div>
-                  <div className="story-slide-copy">
-                    <h3>{video.title}</h3>
-                    <p className="video-meta">{video.meta}</p>
-                    <p>{video.description}</p>
+                    <button
+                      className="story-preview"
+                      type="button"
+                      hidden={showPlayer}
+                      aria-label={`${isActive ? 'Play' : 'Center'} ${video.title}`}
+                      aria-disabled={isActive && !video.media.src || undefined}
+                      onClick={() => isActive && !moving ? playStory(index) : navigate({ index })}
+                    >
+                      <span className="story-slide-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
+                      <span className="story-play" aria-hidden="true"><Play fill="currentColor" size={23} /></span>
+                      <span className="story-preview-label" aria-hidden="true">{isActive ? 'Watch story' : 'Explore story'}</span>
+                    </button>
                   </div>
                 </article>
               )
             })}
           </div>
+          <div className="story-captions">
+            {patientStories.map((video, index) => (
+              <div key={video.title} className="story-slide-copy" data-active={index === carousel.index} aria-hidden={index !== carousel.index}>
+                <div>
+                  <h3>{video.title}</h3>
+                  <p className="video-meta">{video.meta}</p>
+                </div>
+                <p className="story-description">{video.description}</p>
+                {video.media.credit && <p className="story-credit">{video.media.credit}</p>}
+              </div>
+            ))}
+          </div>
+          <p className="sr-only" role="status" aria-atomic="true">
+            {!moving && `Story ${carousel.index + 1} of ${patientStories.length}: ${patientStories[carousel.index].title}`}
+          </p>
+          {playbackError && <p className="story-playback-error" role="alert">{playbackError}</p>}
           <div className="story-carousel-actions">
             <div className="story-carousel-controls">
-              <button type="button" onClick={() => centerSlide(activeIndex - 1)} aria-label="Previous patient story">
+              <button className="story-arrow" type="button" onClick={() => navigate({ step: -1 })} aria-label="Previous patient story" aria-controls="story-carousel-stage">
                 <ChevronLeft />
               </button>
-              <span aria-live="polite"><strong>{String(carouselSlides[activeIndex].logicalIndex + 1).padStart(2, '0')}</strong> / {String(patientStories.length).padStart(2, '0')}</span>
-              <button type="button" onClick={() => centerSlide(activeIndex + 1)} aria-label="Next patient story">
+              <div className="story-pagination" role="group" aria-label="Choose patient story">
+                {patientStories.map((video, index) => (
+                  <button
+                    key={video.title}
+                    type="button"
+                    aria-label={`Go to story ${index + 1}: ${video.title}`}
+                    aria-current={index === carousel.index ? 'true' : undefined}
+                    aria-controls="story-carousel-stage"
+                    onClick={() => navigate({ index })}
+                  ><span /></button>
+                ))}
+              </div>
+              <button className="story-arrow" type="button" onClick={() => navigate({ step: 1 })} aria-label="Next patient story" aria-controls="story-carousel-stage">
                 <ChevronRight />
               </button>
             </div>
+            <span className="story-count" aria-hidden="true"><strong>{String(carousel.index + 1).padStart(2, '0')}</strong> / {String(patientStories.length).padStart(2, '0')}</span>
             <a className="text-link story-more" href="#">View more patient stories <ArrowRight size={17} /></a>
           </div>
         </div>
@@ -503,7 +618,7 @@ function useCountUp(value: number | null) {
 }
 
 function Services() {
-  const [featured, ...rest] = services
+  const photoCredits = [...new Set(services.map(({ media }) => media.credit).filter(Boolean))].join(' · ')
   return (
     <section id="services" className="section" aria-labelledby="services-title">
       <div className="site-container">
@@ -511,28 +626,34 @@ function Services() {
           <h2 id="services-title">Find the care you need.</h2>
           <p>Explore treatment options, then talk with the clinic about what is appropriate for your health and goals.</p>
         </Reveal>
-        <div className="services-layout">
-          <article className="service-feature">
-            <MediaPlaceholder media={featured.media} label="Treatment image" />
-            <div>
-              <h3>{featured.name}</h3>
-              <p>{featured.description}</p>
-              <a className="text-link" href={featured.href}>View treatment <ArrowRight size={17} /></a>
-            </div>
-          </article>
-          <div className="service-list">
-            {rest.map((service) => (
-              <article key={service.name} className="service-row">
-                <div>
-                  <h3>{service.name}</h3>
-                  <p>{service.description}</p>
-                </div>
-                <a href={service.href} aria-label={`Learn more about ${service.name}`}><ChevronRight /></a>
-              </article>
-            ))}
-          </div>
+        <div className="services-grid">
+          {services.map((service, index) => (
+            <a
+              key={service.name}
+              className="service-card"
+              href={service.href}
+              aria-labelledby={`service-title-${index}`}
+            >
+              <div className="service-card-image">
+                <img
+                  src={service.media.src ?? service.media.poster}
+                  alt={service.media.alt}
+                  loading="lazy"
+                  decoding="async"
+                />
+                <span className="service-card-arrow" aria-hidden="true"><ArrowRight size={18} /></span>
+              </div>
+              <div className="service-card-copy">
+                <h3 id={`service-title-${index}`}>{service.name}</h3>
+                <p>{service.description}</p>
+              </div>
+            </a>
+          ))}
         </div>
-        <a className="button button--outline services-all" href="https://alratadental.com/services/">View all services</a>
+        <div className="services-footer">
+          {photoCredits && <p className="services-credit">Photography: {photoCredits}</p>}
+          <a className="button button--outline services-all" href="https://alratadental.com/services/">View all services</a>
+        </div>
       </div>
     </section>
   )
@@ -540,7 +661,7 @@ function Services() {
 
 function Education() {
   return (
-    <section className="section education" aria-labelledby="education-title">
+    <section className="section education education--gradient" aria-labelledby="education-title">
       <div className="site-container">
         <Reveal className="section-heading section-heading--split section-heading--inverse">
           <h2 id="education-title">Answers from the dental chair.</h2>
@@ -585,6 +706,110 @@ function WhyChoose() {
   )
 }
 
+function ImageComparison({ before, after }: { before: MediaAsset; after: MediaAsset }) {
+  const [position, setPosition] = useState(50)
+  const [dragging, setDragging] = useState(false)
+  const rangeRef = useRef<HTMLInputElement>(null)
+  const pointer = useRef<{ id: number; x: number; y: number; dragging: boolean } | null>(null)
+  const descriptionId = useId()
+
+  const updatePosition = (event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect()
+    if (bounds.width === 0) return
+    setPosition(Math.round(Math.max(0, Math.min(100, (event.clientX - bounds.left) / bounds.width * 100))))
+  }
+
+  const clearPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (pointer.current?.id !== event.pointerId) return
+    pointer.current = null
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+
+  return (
+    <figure className="comparison">
+      <div
+        className="comparison-frame"
+        style={{ '--comparison-position': `${position}%` } as React.CSSProperties}
+        data-dragging={dragging || undefined}
+        onPointerDown={(event) => {
+          if (!event.isPrimary || event.button !== 0 || pointer.current) return
+          const isMouse = event.pointerType === 'mouse'
+          pointer.current = { id: event.pointerId, x: event.clientX, y: event.clientY, dragging: isMouse }
+          if (isMouse) {
+            event.currentTarget.setPointerCapture(event.pointerId)
+            rangeRef.current?.focus({ preventScroll: true })
+            setDragging(true)
+            updatePosition(event)
+          }
+        }}
+        onPointerMove={(event) => {
+          const start = pointer.current
+          if (!start || start.id !== event.pointerId) return
+          if (!start.dragging) {
+            const dx = Math.abs(event.clientX - start.x)
+            const dy = Math.abs(event.clientY - start.y)
+            // Let vertical gestures scroll the page without moving the divider.
+            if (dy > 8 && dy >= dx) {
+              clearPointer(event)
+              return
+            }
+            if (dx <= 8 || dx <= dy * 1.25) return
+            start.dragging = true
+            event.currentTarget.setPointerCapture(event.pointerId)
+            rangeRef.current?.focus({ preventScroll: true })
+            setDragging(true)
+          }
+          updatePosition(event)
+        }}
+        onPointerUp={(event) => {
+          const start = pointer.current
+          if (!start || start.id !== event.pointerId) return
+          const isTap = Math.abs(event.clientX - start.x) <= 8 && Math.abs(event.clientY - start.y) <= 8
+          if (start.dragging || isTap) {
+            rangeRef.current?.focus({ preventScroll: true })
+            updatePosition(event)
+          }
+          clearPointer(event)
+        }}
+        onPointerCancel={clearPointer}
+        onLostPointerCapture={clearPointer}
+      >
+        <div className="comparison-image comparison-image--after">
+          <img src={after.src ?? after.poster} alt={after.alt} loading="lazy" decoding="async" draggable={false} />
+          <span className="comparison-label comparison-label--after">After</span>
+        </div>
+        <div className="comparison-image comparison-image--before">
+          <img src={before.src ?? before.poster} alt={before.alt} loading="lazy" decoding="async" draggable={false} />
+          <span className="comparison-label">Before</span>
+        </div>
+        <span className="comparison-divider" aria-hidden="true" />
+        <span className="comparison-handle" aria-hidden="true">
+          <ChevronLeft size={20} /><ChevronRight size={20} />
+        </span>
+        <input
+          ref={rangeRef}
+          className="comparison-range sr-only"
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={position}
+          onChange={(event) => setPosition(event.currentTarget.valueAsNumber)}
+          aria-label="Before and after image comparison"
+          aria-valuetext={`${position}% before image, ${100 - position}% after image`}
+          aria-describedby={descriptionId}
+        />
+      </div>
+      <figcaption className="comparison-caption" id={descriptionId}>
+        <span className="comparison-instruction"><ChevronLeft size={14} aria-hidden="true" /><ChevronRight size={14} aria-hidden="true" /> Drag to compare</span>
+        <span className="comparison-note">Illustrative comparison<span className="sr-only">—not a matched patient result.</span></span>
+        <span className="sr-only">Use the arrow keys to adjust. Home shows the after image; End shows the before image.</span>
+      </figcaption>
+    </figure>
+  )
+}
+
 function Results() {
   return (
     <section className="section results" aria-labelledby="results-title">
@@ -597,10 +822,8 @@ function Results() {
           </nav>
           <p className="disclaimer">Illustrative dental imagery only—not a matched patient result. Individual outcomes vary. Final before-and-after imagery requires patient consent and clinical review.</p>
         </Reveal>
-        <Reveal className="comparison-placeholder">
-          <div><MediaPlaceholder media={resultMedia[0]} label="Illustrative treatment image" /></div>
-          <div><MediaPlaceholder media={resultMedia[1]} label="Illustrative smile image" /></div>
-          <span className="comparison-line" aria-hidden="true" />
+        <Reveal className="results-comparison">
+          <ImageComparison before={resultMedia[0]} after={resultMedia[1]} />
         </Reveal>
       </div>
     </section>
@@ -614,13 +837,14 @@ function OfferSection() {
         <MediaPlaceholder media={offer.media} label="Offer treatment image" />
         <Reveal className="offer-copy">
           <div className="offer-heading">
+            <p className="offer-eyebrow"><span aria-hidden="true" /> Your first visit</p>
             <h2 id="offer-title">{offer.name}</h2>
             <div className="offer-price" aria-label={`${offer.price} offer`}>{offer.price}</div>
           </div>
           <div className="offer-details">
             <p>{offer.description}</p>
             <p className="offer-terms">{offer.availability}</p>
-            <a className="button button--primary" href={offer.href}>Ask about this offer <ArrowRight size={18} /></a>
+            <a className="button button--primary" href={offer.href}>Ask about this offer <ArrowRight size={18} aria-hidden="true" /></a>
           </div>
         </Reveal>
       </div>
