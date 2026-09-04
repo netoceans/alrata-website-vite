@@ -70,13 +70,13 @@ const clinicImage = (
 });
 
 const localVideoFiles: Record<string, string> = {
-  '5889024': '/media/dental-care-hero.mp4',
-  '5356598': '/media/dental-consultation.mp4',
-  '5889025': '/media/dental-treatment-closeup.mp4',
-  '5889135': '/media/dental-patient-care.mp4',
-  '5889017': '/media/dental-consultation.mp4',
-  '5889022': '/media/dental-treatment-closeup.mp4',
-  '5889028': '/media/dental-patient-care.mp4',
+  '5889024': `${import.meta.env.BASE_URL}media/dental-care-hero.mp4`,
+  '5356598': `${import.meta.env.BASE_URL}media/dental-consultation.mp4`,
+  '5889025': `${import.meta.env.BASE_URL}media/dental-treatment-closeup.mp4`,
+  '5889135': `${import.meta.env.BASE_URL}media/dental-patient-care.mp4`,
+  '5889017': `${import.meta.env.BASE_URL}media/dental-consultation.mp4`,
+  '5889022': `${import.meta.env.BASE_URL}media/dental-treatment-closeup.mp4`,
+  '5889028': `${import.meta.env.BASE_URL}media/dental-patient-care.mp4`,
 };
 
 const pexelsVideo = (
