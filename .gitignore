@@ -18,3 +18,9 @@ Thumbs.db
 .idea/
 node_modules
 .pnpm-store
+.next/
+*.tsbuildinfo
+artifacts/
+test-results/
+playwright-report/
+.npm-cache/
